@@ -1,14 +1,17 @@
-/*
- * Arduino sketch to receive APA102 data, and drive HUB75 panel using Pixelvation Engine
- * Requires SmartMatrix Library 4.0 and Arduino ESP32
- */
-
-#include <MatrixHardware_ESP32_HUB75AdapterLite_V0.h>    // This file contains multiple ESP32 hardware configurations, edit the file to define GPIOPINOUT (or add #define GPIOPINOUT with a hardcoded number before this #include)
-//#include <MatrixHardware_ESP32_HUB75Adapter_SMT.h>
-//#include <MatrixHardware_ESP32_HUB75Adapter_THT.h>
+// choose hardware config for both SmartMatrix Library HUB75 pins and I2S In pins using one of the headers below
+//#include "MatrixHardware_ESP32_HUB75AdapterLite_V0_I2sIn1Bit.h"
+//#include "MatrixHardware_ESP32_HUB75AdapterLite_V0_I2sIn2Bit.h"
+//#include "MatrixHardware_ESP32_HUB75AdapterLite_V0_I2sIn4Bit.h"
+//#include "MatrixHardware_ESP32_HUB75AdapterLite_V0_I2sIn8Bit.h"
+//#include <MatrixHardware_ESP32_HUB75Adapter_SMT_I2sIn.h>
+//#include <MatrixHardware_ESP32_HUB75Adapter_THT_I2sIn.h>
 #include <SmartMatrix.h>
 
 #include "i2s_in.h"
+
+#ifndef GPIO_I2S_IN_PIN_CLK
+#pragma GCC error "I2S In pins not defined, include hardware-appropriate header at the top of your sketch"
+#endif
 
 // colorwheel.c has been modified to use the gimp32x32bitmap struct
 #include "colorwheel.c"
@@ -111,8 +114,7 @@ void drawBitmap(int16_t x, int16_t y, const gimp32x32bitmap* bitmap) {
 }
 
 // we store one extra byte than we normally need, as if the incoming data isn't perfectly aligned along the byte boundary, it spills over into one more byte
-uint8_t dataBuffer[DATA_BUFFER_MAX_BYTES + 1];
-
+uint8_t dataBuffer[I2S_IN_BUFFER_SIZE + 1];
 
 // TODO: do we need this for debugging?
 //int previousBufferIndex;
@@ -132,8 +134,11 @@ I2sInRxBlock ** i2sInRxBlocksLookupTable;
 
 void setup() {
     Serial.begin(115200);
-    setupI2sIn();
+
     cbInit(&i2sInCircularBuffer, I2S_IN_NUM_BUFFERS);
+    setupI2sIn(GPIO_I2S_IN_PIN_EN, I2S_RISING_EDGE_CLK, GPIO_I2S_IN_PIN_CLK,
+        GPIO_I2S_IN_PIN_D0, GPIO_I2S_IN_PIN_D1, GPIO_I2S_IN_PIN_D2, GPIO_I2S_IN_PIN_D3,
+        GPIO_I2S_IN_PIN_D4, GPIO_I2S_IN_PIN_D5, GPIO_I2S_IN_PIN_D6, GPIO_I2S_IN_PIN_D7);
 
     cbInit(&i2sInCircularBufferLocal, I2S_IN_LOCAL_NUM_BUFFERS);
 
@@ -233,52 +238,16 @@ int getAlignedApa102DataFromI2sInStream(uint8_t * bufferBytes, int bitOffsetLeft
     memcpy(&tempBlock, i2sInRxBlocksLookupTable[bufferIndexLocal], sizeof(I2sInRxBlock));
     block = &tempBlock;
 
-    // note this is double the amount of actual data in the buffer due to I2S peripheral quirkiness/misconfiguration
     int i2sInBytesReceived = block->numBytes;
 
     uint16_t tempWord = 0x0000;
     int dataBufferPosition = 0;
 
-#if (I2S_IN_PARALLEL_BITS < 8)
-    int bitsLoadedIntoTempWord = 0;
-#endif
-
-#if (I2S_IN_PARALLEL_BITS == 1)
-    const int i2sParallelMask = 0x01;
-#endif
-#if (I2S_IN_PARALLEL_BITS == 2)
-    const int i2sParallelMask = 0x03;
-#endif
-#if (I2S_IN_PARALLEL_BITS == 4)
-    const int i2sParallelMask = 0x0F;
-#endif
-#if (I2S_IN_PARALLEL_BITS == 8)
-    const int i2sParallelMask = 0xFF;
-#endif
-
     // load remaining bits from previous buffer into the first byte of the buffer which is only OR'd later
     bufferBytes[0] = previousBufferPartialByte;
 
-    for (int i = 0; i < i2sInBytesReceived/2; i++) {
-        // get data of interest out of I2S weird interleaving pattern
-        uint8_t tempByte;
-
-        if (i % 2)
-            tempByte = block->data[i * 2 - 2];
-        else
-            tempByte = block->data[i * 2 + 2];
-
-#if (I2S_IN_PARALLEL_BITS < 8)
-        tempWord <<= I2S_IN_PARALLEL_BITS;
-        tempWord |= (tempByte & i2sParallelMask);
-
-        if (++bitsLoadedIntoTempWord < 8)
-            continue;
-
-        bitsLoadedIntoTempWord = 0;
-#else
-        tempWord = tempByte;
-#endif
+    for (int i = 0; i < i2sInBytesReceived; i++) {
+        tempWord = block->data[i];
         tempWord <<= bitOffsetLeft;
 
         if (bitOffsetLeft) {
@@ -298,7 +267,7 @@ int getAlignedApa102DataFromI2sInStream(uint8_t * bufferBytes, int bitOffsetLeft
     printf("shifted\n");
 
     uint8_t * dataPtr = bufferBytes;
-    for(int i=0; i < CONVERT_I2SIN_BYTES_TO_DATA_BUFFER_BYTES(i2sInBytesReceived); i++) {
+    for(int i=0; i < i2sInBytesReceived; i++) {
         if (i && i%16 == 0)
             printf("\n");
 
@@ -309,9 +278,9 @@ int getAlignedApa102DataFromI2sInStream(uint8_t * bufferBytes, int bitOffsetLeft
     cbRead(&i2sInCircularBufferLocal);
 
     // save remaining bits from previous buffer to be parsed along with next received I2sInRxBlock
-    previousBufferPartialByte = bufferBytes[CONVERT_I2SIN_BYTES_TO_DATA_BUFFER_BYTES(i2sInBytesReceived)];
+    previousBufferPartialByte = bufferBytes[i2sInBytesReceived];
 
-    return (CONVERT_I2SIN_BYTES_TO_DATA_BUFFER_BYTES(i2sInBytesReceived));
+    return i2sInBytesReceived;
 }
 
 // returns apa102Position:
@@ -443,10 +412,11 @@ void loop() {
 
 #include "soc/i2s_reg.h"
 
-        printf(" %d, %d, %d \r\n", framesReceived, cbGetMinFree(&i2sInCircularBuffer), cbGetMinFree(&i2sInCircularBufferLocal));
+        printf(" %d, %d, %d, %d, %d \r\n", framesReceived, cbGetMinFree(&i2sInCircularBuffer), cbGetMinFree(&i2sInCircularBufferLocal), cbGetMinFree(&i2sInRawCircularBuffer), bitOffset);
         //printf(" %d, %d, %d %08X %08X %08X %08X %08X\r\n", framesReceived, cbGetMinFree(&i2sInCircularBuffer), cbGetMinFree(&i2sInCircularBufferLocal), REG_READ(I2S_INLINK_DSCR_REG(0)), REG_READ(I2S_INLINK_DSCR_BF0_REG(0)), REG_READ(I2S_IN_EOF_DES_ADDR_REG(0)), REG_READ(I2S_INLINK_DSCR_BF1_REG(0)), REG_READ(I2S_LC_STATE0_REG(0)));
         cbClearMinFree(&i2sInCircularBufferLocal);
         cbClearMinFree(&i2sInCircularBuffer);
+        cbClearMinFree(&i2sInRawCircularBuffer);
     }
 
     do {
@@ -460,6 +430,7 @@ void loop() {
             // do nothing
         } else if(i2sState == full || i2sState == overflow) {
             // TODO: flush local buffers as well?
+            // TODO: what happens with overflow and i2sInRaw?
             flushI2sInStream();
             printf("%%");
             countingFail = true;
@@ -496,7 +467,7 @@ void loop() {
 
 #ifdef I2S_IN_DEBUG_FILL_BLOCKS_WITH_PATTERN
             // testing: fill buffers with known pattern
-            memset(&i2sInRxBlocks[bufferIndex], 0x55, sizeof(I2sInRxBlock));
+            memset(&i2sInRxBlocks[bufferIndex], 0xAA, sizeof(I2sInRxBlock));
 #endif
 
             cbWrite(&i2sInCircularBufferLocal);
@@ -575,7 +546,7 @@ void loop() {
                 } else {
                     if (runOncePerCountingFail) {
 #if 1
-                        printf("-");
+                        printf("-%02X:%d:%02X:%02X:%02X:%02X:%02X,", dataBuffer[i], apa102Position, dataBuffer[i - 1], dataBuffer[i + 1], dataBuffer[i + 2], dataBuffer[i + 3], dataBuffer[i + 4]);
                         runOncePerCountingFail = false;
 #else
                         gpio_set_level(DEBUG_I2SIN_2_GPIO, 0);
@@ -719,9 +690,11 @@ void loop() {
             }
         }
 
+#ifdef DEBUG_I2SIN_2_GPIO
         gpio_set_level(DEBUG_I2SIN_2_GPIO, 0);
         gpio_set_level(DEBUG_I2SIN_2_GPIO, 1);
         gpio_set_level(DEBUG_I2SIN_2_GPIO, 0);
+#endif
         //printf("\r\n\r\nDATA BUFFER PROCESSED %d\r\n", bufferIndex);
 #if 0
     // TODO: this error is seldom seen, what is it?  Do we need to track it somewhere?
