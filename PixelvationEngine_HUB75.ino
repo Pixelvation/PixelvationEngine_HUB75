@@ -1,3 +1,8 @@
+/*
+ * Arduino sketch to receive APA102 data, and drive HUB75 panel using Pixelvation Engine
+ * Requires SmartMatrix Library 4.0 and Arduino ESP32
+ */
+
 // choose hardware config for both SmartMatrix Library HUB75 pins and I2S In pins using one of the headers below
 //#include "MatrixHardware_ESP32_HUB75AdapterLite_V0_I2sIn1Bit.h"
 //#include "MatrixHardware_ESP32_HUB75AdapterLite_V0_I2sIn2Bit.h"
